@@ -1,0 +1,93 @@
+; i2s.pio - I2S audio output for MAX98357A DAC
+;
+; MAX98357A expects standard I2S format:
+;   - 16-bit stereo, MSB first
+;   - Data changes on BCLK falling edge
+;   - Data sampled on BCLK rising edge
+;   - LRCLK: LOW = Left channel, HIGH = Right channel
+;
+; Pin mapping:
+;   - OUT pin: DIN (data)
+;   - Side-set pin 0: BCLK (bit clock)
+;   - Side-set pin 1: LRCLK (word select)
+
+.program i2s_out
+.side_set 2
+
+; Each stereo sample is 32 bits total (16 left + 16 right)
+; We output 1 bit per 2 PIO cycles (low-high for each bit)
+
+.wrap_target
+public entry_point:
+    ; === LEFT CHANNEL (LRCLK = 0) ===
+    ; First bit - transition LRCLK low, output MSB
+    set x, 14               side 0b00   ; x = 14 (15 more bits after first)
+    out pins, 1             side 0b00   ; Output first bit, BCLK low
+    jmp !osre left_data     side 0b01   ; BCLK high, check for data
+left_data:
+    out pins, 1             side 0b00   ; Output bit, BCLK low
+    jmp x-- left_data       side 0b01   ; BCLK high, loop for remaining bits
+
+    ; === RIGHT CHANNEL (LRCLK = 1) ===
+    ; First bit - transition LRCLK high, output MSB
+    set x, 14               side 0b10   ; LRCLK high, x = 14
+    out pins, 1             side 0b10   ; Output first bit, BCLK low
+    jmp !osre right_data    side 0b11   ; BCLK high
+right_data:
+    out pins, 1             side 0b10   ; Output bit, BCLK low
+    jmp x-- right_data      side 0b11   ; BCLK high, loop
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void i2s_program_init(PIO pio, uint sm, uint offset,
+                                    uint data_pin, uint clock_pin_base,
+                                    uint sample_rate) {
+    // Initialize GPIO pins for PIO
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, clock_pin_base);      // BCLK
+    pio_gpio_init(pio, clock_pin_base + 1);  // LRCLK
+
+    // Set pin directions (all outputs)
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, true);
+
+    // Get default config
+    pio_sm_config c = i2s_out_program_get_default_config(offset);
+
+    // OUT pin configuration (DIN)
+    sm_config_set_out_pins(&c, data_pin, 1);
+
+    // Side-set pins (BCLK, LRCLK)
+    sm_config_set_sideset_pins(&c, clock_pin_base);
+
+    // Shift configuration:
+    // - Shift left (MSB first)
+    // - Autopull at 32 bits
+    // - No autopush (we're only outputting)
+    sm_config_set_out_shift(&c, false, true, 32);
+
+    // Join FIFOs for TX (gives us 8 entries instead of 4)
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    // Calculate clock divider
+    // BCLK frequency = sample_rate * 32 (16 bits * 2 channels)
+    // PIO runs at 2 cycles per bit (low-high), so PIO_freq = BCLK * 2
+    float bclk_freq = (float)sample_rate * 32.0f;
+    float pio_freq = bclk_freq * 2.0f;
+    float div = (float)clock_get_hz(clk_sys) / pio_freq;
+
+    // Clamp divider to valid range
+    if (div < 1.0f) div = 1.0f;
+    if (div > 65535.0f) div = 65535.0f;
+
+    sm_config_set_clkdiv(&c, div);
+
+    // Initialize state machine
+    pio_sm_init(pio, sm, offset + i2s_out_offset_entry_point, &c);
+
+    // Start the state machine
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
