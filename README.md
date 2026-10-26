@@ -4,7 +4,7 @@ A 12-voice polyphonic synthesizer for the Raspberry Pi Pico W, written in C with
 
 > Developed as a course project (Programmieren III) at MCI, winter semester 2025/26; uploaded October 2026.
 
-![The finished build](docs/images/build.jpg)
+![The finished build](PXL_20261026_212953217.jpg)
 
 ## Features
 
